@@ -1,5 +1,25 @@
 # User Registration Workflow
 
+## Prerequisites
+
+Before testing the user registration workflow, ensure the following services are **running and healthy**:
+
+### Required Services
+
+| Category           | Service                | Port            | Service Endpoint             | Health Endpoint                | Purpose                      |
+| ------------------ | ---------------------- | --------------- | ---------------------------- | ------------------------------ | ---------------------------- |
+| **Infrastructure** | RabbitMQ               | 5672 (15672 UI) | `amqp://localhost:5672`      | `http://localhost:15672`       | Event-driven messaging       |
+|                    | Mailpit                | 1025 (8025 UI)  | `smtp://localhost:1025`      | `http://localhost:8025`        | Email testing                |
+| **Services**       | User Service           | 3002            | `http://localhost:3002/api`  | `http://localhost:3002/health` | User profile management      |
+|                    | Message Broker Service | 4000            | `http://localhost:4000/api`  | `http://localhost:4000/health` | RabbitMQ routing             |
+|                    | Notification Service   | 3003            | Event consumer only          | `http://localhost:3003/health` | Email notifications          |
+|                    | Audit Service          | 3004            | Event consumer only          | `http://localhost:3004/health` | Event logging & compliance   |
+|                    | Auth Service           | 3001            | `http://localhost:3001/auth` | `http://localhost:3001/health` | Authentication orchestration |
+| **Gateway**        | Web BFF                | 3100            | `http://localhost:3100/bff`  | `http://localhost:3100/health` | API Gateway                  |
+| **Frontend**       | Web UI                 | 3000            | `http://localhost:3000`      | `http://localhost:3000`        | User interface               |
+
+---
+
 ## Complete End-to-End Flow with Event-Driven Architecture
 
 ```
@@ -583,222 +603,3 @@ Web UI (React)
 | `user.created`                      | User Service | Audit Service        | Domain event: User record created in database  |
 | `auth.user.registered`              | Auth Service | Audit Service        | Workflow event: Registration process completed |
 | `auth.email.verification.requested` | Auth Service | Notification Service | Workflow event: Trigger verification email     |
-
-## Security Features
-
-✅ **Password Security**
-
-- Bcrypt hashing with 10 salt rounds
-- Password strength validation
-- Never stored in plain text
-
-✅ **JWT Security**
-
-- HTTP-only cookies (prevents XSS)
-- Short expiration (15 minutes)
-- CSRF protection
-- Secure & SameSite flags
-
-✅ **Email Verification**
-
-- Required before account activation
-- Time-limited tokens (24 hours)
-- Signed JWT tokens
-
-✅ **Audit Trail**
-
-- All registration attempts logged
-- IP address tracking
-- User agent logging
-- Correlation ID for request tracing
-
-✅ **Input Validation**
-
-- Client-side validation (React)
-- Server-side validation (Auth Service)
-- Database-level validation (User Service)
-- Email format verification
-
-## Error Handling
-
-### **Common Error Scenarios:**
-
-1. **Email Already Exists**
-
-   ```
-   HTTP 409 Conflict
-   {
-     "error": "A user with this email already exists"
-   }
-   ```
-
-2. **Weak Password**
-
-   ```
-   HTTP 400 Bad Request
-   {
-     "error": "Password must contain at least 8 characters...",
-     "field": "password",
-     "requirements": [
-       "Minimum 8 characters",
-       "At least 1 uppercase letter",
-       "At least 1 lowercase letter",
-       "At least 1 number",
-       "At least 1 special character"
-     ]
-   }
-   ```
-
-3. **Invalid Email Format**
-
-   ```
-   HTTP 400 Bad Request
-   {
-     "error": "Invalid email format"
-   }
-   ```
-
-4. **User Service Unavailable**
-
-   ```
-   HTTP 503 Service Unavailable
-   {
-     "error": "User service is temporarily unavailable"
-   }
-   ```
-
-5. **Message Broker Connection Failed**
-   - Registration succeeds
-   - Event publishing fails
-   - Warning logged but user still created
-   - Manual intervention may be needed for audit/notification
-
-## Database Schema
-
-### **User Document (MongoDB)**
-
-```json
-{
-  "_id": ObjectId("507f1f77bcf86cd799439011"),
-  "email": "user@example.com",
-  "password": "$2b$10$N9qo8uLOickgx2ZMRZoMye...",
-  "firstName": "John",
-  "lastName": "Doe",
-  "phoneNumber": "+1234567890",
-  "isEmailVerified": false,
-  "isActive": true,
-  "roles": ["customer"],
-  "createdAt": ISODate("2025-10-27T10:30:00.000Z"),
-  "updatedAt": ISODate("2025-10-27T10:30:00.000Z")
-}
-```
-
-**Indexes:**
-
-- `email` (unique)
-- `createdAt`
-- `roles`
-
-### **Audit Log Document (MongoDB)**
-
-```json
-{
-  "_id": ObjectId("507f1f77bcf86cd799439012"),
-  "eventType": "auth.user.registered",
-  "userId": "507f1f77bcf86cd799439011",
-  "email": "user@example.com",
-  "ipAddress": "192.168.1.100",
-  "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
-  "timestamp": ISODate("2025-10-27T10:30:00.000Z"),
-  "correlationId": "550e8400-e29b-41d4-a716-446655440000",
-  "payload": {
-    "firstName": "John",
-    "lastName": "Doe",
-    "phoneNumber": "+1234567890"
-  },
-  "success": true,
-  "action": "USER_REGISTRATION"
-}
-```
-
-**Indexes:**
-
-- `userId`
-- `eventType`
-- `timestamp`
-- `correlationId`
-
-### **Email Log Document (MongoDB)**
-
-```json
-{
-  "_id": ObjectId("507f1f77bcf86cd799439013"),
-  "type": "email-verification",
-  "to": "user@example.com",
-  "subject": "Verify your email address",
-  "sentAt": ISODate("2025-10-27T10:30:05.000Z"),
-  "status": "sent",
-  "correlationId": "550e8400-e29b-41d4-a716-446655440000",
-  "messageId": "email-service-msg-id-12345"
-}
-```
-
-**Indexes:**
-
-- `to`
-- `sentAt`
-- `status`
-- `correlationId`
-
-## Technology Stack
-
-| Component            | Technology         | Port      | Database |
-| -------------------- | ------------------ | --------- | -------- |
-| Web UI               | React              | 3000      | -        |
-| Web BFF              | Express.js         | 4000      | -        |
-| Auth Service         | Express.js         | 3001      | -        |
-| User Service         | Express.js         | 3002      | MongoDB  |
-| Notification Service | TypeScript/Express | 3003      | MongoDB  |
-| Audit Service        | TypeScript/Express | 3004      | MongoDB  |
-| Message Broker       | RabbitMQ           | 5672/9001 | -        |
-
-## Performance Metrics
-
-**Expected Response Times:**
-
-- UI → BFF: < 50ms
-- BFF → Auth: < 50ms
-- Auth → User Service: < 100ms
-- User creation: < 200ms
-- Total registration: < 500ms
-- Event publishing: Async (< 50ms)
-- Email delivery: 1-5 seconds (async)
-
-## Compliance & Standards
-
-✅ **GDPR Compliant**
-
-- User consent tracking
-- Data minimization
-- Right to be forgotten
-- Audit trail
-
-✅ **OWASP Security**
-
-- Password hashing (Bcrypt)
-- JWT best practices
-- XSS prevention (HTTP-only cookies)
-- CSRF protection
-
-✅ **Industry Standards**
-
-- RFC 5322 (Email format)
-- JWT (RFC 7519)
-- OAuth 2.0 principles
-- RESTful API design
-
----
-
-**Last Updated:** October 27, 2025
-**Version:** 1.0
-**Maintained By:** AIOutlet Engineering Team
