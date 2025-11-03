@@ -10,10 +10,10 @@ Before testing the user registration workflow, ensure the following services are
 | ------------------ | ---------------------- | --------------- | ---------------------------- | ------------------------------ | ---------------------------- |
 | **Infrastructure** | RabbitMQ               | 5672 (15672 UI) | `amqp://localhost:5672`      | `http://localhost:15672`       | Event-driven messaging       |
 |                    | Mailpit                | 1025 (8025 UI)  | `smtp://localhost:1025`      | `http://localhost:8025`        | Email testing                |
-| **Services**       | User Service           | 3002            | `http://localhost:3002/api`  | `http://localhost:3002/health` | User profile management      |
-|                    | Message Broker Service | 4000            | `http://localhost:4000/api`  | `http://localhost:4000/health` | RabbitMQ routing             |
+| **Services**       | Message Broker Service | 4000            | `http://localhost:4000/api`  | `http://localhost:4000/health` | RabbitMQ routing             |
 |                    | Notification Service   | 3003            | Event consumer only          | `http://localhost:3003/health` | Email notifications          |
 |                    | Audit Service          | 3004            | Event consumer only          | `http://localhost:3004/health` | Event logging & compliance   |
+|                    | User Service           | 3002            | `http://localhost:3002/api`  | `http://localhost:3002/health` | User profile management      |
 |                    | Auth Service           | 3001            | `http://localhost:3001/auth` | `http://localhost:3001/health` | Authentication orchestration |
 | **Gateway**        | Web BFF                | 3100            | `http://localhost:3100/bff`  | `http://localhost:3100/health` | API Gateway                  |
 | **Frontend**       | Web UI                 | 3000            | `http://localhost:3000`      | `http://localhost:3000`        | User interface               |
@@ -22,14 +22,63 @@ Before testing the user registration workflow, ensure the following services are
 
 ## Complete End-to-End Flow with Event-Driven Architecture
 
+### **Service Client Pattern**
+
+The Auth Service uses a **Service Client pattern** to communicate with the User Service. This pattern provides:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  AUTH SERVICE ARCHITECTURE                                          │
+│                                                                     │
+│  Controller Layer (auth.controller.js)                             │
+│  ├─ Business logic & orchestration                                 │
+│  ├─ Minimal validation (required fields only)                      │
+│  ├─ Token generation & management                                  │
+│  └─ Event publishing                                               │
+│                    ↓ calls                                          │
+│  Service Client Layer (userServiceClient.js)                       │
+│  ├─ HTTP communication with User Service                           │
+│  ├─ Request/Response transformation                                │
+│  ├─ Error handling & normalization                                 │
+│  ├─ Network error recovery (503 conversion)                        │
+│  ├─ Response parsing (JSON/text)                                   │
+│  └─ Error message extraction                                       │
+│                    ↓ HTTP                                           │
+│  USER SERVICE (External - Port 3002)                               │
+│  ├─ User data persistence                                          │
+│  ├─ Business validation (Layer 3)                                  │
+│  ├─ Password hashing                                               │
+│  └─ Database operations                                            │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Benefits of Service Client Pattern:**
+
+- ✅ **Separation of Concerns**: Controller focuses on workflow, client handles communication
+- ✅ **Error Handling**: Centralized error transformation and retry logic
+- ✅ **Testability**: Easy to mock service client in unit tests
+- ✅ **Reusability**: Same client used by multiple controllers
+- ✅ **Resilience**: Network error handling and timeout management
+- ✅ **Logging**: Centralized logging of service-to-service calls
+
+**userServiceClient.js Functions:**
+
+- `getUserByEmail(email)` - Find user by email address
+- `getUserById(id, token)` - Fetch user by ID (admin route)
+- `createUser(userData)` - Create new user (registration)
+- `deleteUserSelf(token)` - Self-service account deletion
+- `deleteUserById(id, token)` - Admin user deletion
+
+---
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                    USER (Browser)                                                │
-│  Fills registration form: email, password, firstName, lastName, phoneNumber (optional)          │
+│  Fills registration form: firstName, lastName, email, phoneNumber, password, confirmPassword    │
 └────────────────────────────────────┬────────────────────────────────────────────────────────────┘
                                      │
                                      │ POST /register
-                                     │ Body: { email, password, firstName, lastName, phoneNumber }
+                                     │ Body: { firstName, lastName, email, phoneNumber, password }
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                  WEB UI (React - Port 3000)                                      │
@@ -40,17 +89,17 @@ Before testing the user registration workflow, ensure the following services are
                                      │
                                      │ HTTP POST /bff/auth/register
                                      │ Content-Type: application/json
-                                     │ Body: { email, password, firstName, lastName, phoneNumber }
+                                     │ Body: { firstName, lastName, email, phoneNumber, password }
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                          WEB BFF (Backend for Frontend - Port 4000)                             │
+│                          WEB BFF (Backend for Frontend - Port 3100)                             │
 │                                                                                                  │
-│  Role: API Gateway & Aggregation Layer                                                          │
+│  Role: API Gateway & Request Routing                                                            │
 │  ├─ Receives registration request from UI                                                       │
-│  ├─ Validates request format                                                                    │
 │  ├─ Adds correlation ID for request tracking                                                    │
-│  ├─ Proxies to Auth Service                                                                     │
-│  └─ Handles response and sets HTTP-only cookies                                                 │
+│  ├─ Logs request attempt                                                                        │
+│  ├─ Proxies to Auth Service (no validation)                                                     │
+│  └─ Handles response and error formatting                                                       │
 └────────────────────────────────────┬────────────────────────────────────────────────────────────┘
                                      │
                                      │ HTTP POST /auth/register
@@ -62,16 +111,28 @@ Before testing the user registration workflow, ensure the following services are
 │                                                                                                  │
 │  Role: Authentication Workflow Orchestrator                                                     │
 │                                                                                                  │
-│  Step 1: Validation                                                                             │
-│  ├─ Validate email format                                                                       │
-│  ├─ Validate password strength (min 8 chars, uppercase, lowercase, number, special char)       │
-│  ├─ Validate required fields (email, password, firstName, lastName)                            │
-│  └─ Check if email already exists                                                              │
+│  Step 1: Minimal Validation (Required Fields Only)                                             │
+│  ├─ Check required fields present: firstName, lastName, email, password                        │
+│  └─ No format/business validation (User Service handles this)                                  │
+│  └─ No uniqueness check (User Service handles this)                                            │
 │                                                                                                  │
 │  Step 2: Create User via User Service ─────────────────────────────────────────────────┐       │
-│  ├─ Call: POST /users                                                                  │       │
-│  ├─ Send: { email, password, firstName, lastName, phoneNumber, roles: ['customer'] }   │       │
-│  └─ Wait for user creation response                                                    │       │
+│  ├─ File: src/services/userServiceClient.js                                            │       │
+│  ├─ Function: createUser(userData)                                                     │       │
+│  ├─ Makes HTTP POST to User Service: POST /users                                       │       │
+│  ├─ Send: { firstName, lastName, email, phoneNumber, password, roles: ['customer'] }   │       │
+│  ├─ Handles responses:                                                                 │       │
+│  │  ├─ Success (201): Returns user object from response                                │       │
+│  │  ├─ Error (409): Extracts & throws "Email already exists" error                     │       │
+│  │  ├─ Error (400): Extracts & throws validation error message                         │       │
+│  │  └─ Network Error: Throws 503 "User service unavailable"                            │       │
+│  ├─ User Service performs all validation:                                              │       │
+│  │  ├─ Email uniqueness check                                                          │       │
+│  │  ├─ Format validation (email, password, names, phone)                               │       │
+│  │  └─ Business rules validation                                                       │       │
+│  └─ userServiceClient returns:                                                         │       │
+│     ├─ Success: User object                                                            │       │
+│     └─ Error: Throws error with statusCode, message, and details                       │       │
 │                                                                                         │       │
 │  Step 3: Token Generation (after user created)                                         │       │
 │  ├─ Generate JWT token (short-lived, 15 minutes)                                       │       │
@@ -101,33 +162,47 @@ Before testing the user registration workflow, ensure the following services are
                       │                           │                    │    (Express.js - Port 3002)  │
                       │  Sets HTTP-only cookies:  │                    │                              │
                       │  ├─ jwt (JWT token)       │                    │  Role: User Data Domain      │
-                      │  ├─ refreshToken          │                    │                              │
-                      │  └─ csrfToken             │                    │  Step 1: Validation          │
-                      │                           │                    │  ├─ Check email uniqueness   │
-                      │  Returns to UI:           │                    │  ├─ Validate email format    │
-                      │  {                        │                    │  └─ Validate required fields │
-                      │    message: "Registration │                    │                              │
-                      │      successful",         │                    │  Step 2: Password Hashing    │
-                      │    requiresVerification:  │                    │  └─ Bcrypt hash (10 rounds)  │
-                      │      true,                │                    │                              │
-                      │    user: { ... }          │                    │  Step 3: User Creation       │
-                      │  }                        │                    │  ├─ Create user document     │
-                      └───────────────────────────┘                    │  │  in MongoDB               │
-                                      │                                │  ├─ Set isEmailVerified:     │
-                                      │                                │  │  false                    │
-                                      ▼                                │  ├─ Set isActive: true       │
-                      ┌───────────────────────────┐                    │  └─ Set default role:        │
-                      │       WEB UI              │                    │     ['customer']             │
+                      │  ├─ refreshToken          │                    │       & Business Validation  │
+                      │  └─ csrfToken             │                    │                              │
+                      │                           │                    │  Step 1: Comprehensive       │
+                      │  Returns to UI:           │                    │          Validation          │
+                      │  {                        │                    │  ├─ Check email uniqueness   │
+                      │    message: "Registration │                    │  ├─ Validate email format    │
+                      │      successful",         │                    │  │  (5-100 chars, RFC)       │
+                      │    requiresVerification:  │                    │  ├─ Validate password        │
+                      │      true,                │                    │  │  (6-25 chars, letter +    │
+                      │    user: { ... }          │                    │  │   number)                 │
+                      │  }                        │                    │  ├─ Validate firstName       │
+                      └───────────────────────────┘                    │  │  (2-50 chars, letters)    │
+                                      │                                │  ├─ Validate lastName        │
+                                      │                                │  │  (0-50 chars, letters)    │
+                                      ▼                                │  ├─ Validate phoneNumber     │
+                      ┌───────────────────────────┐                    │  │  (7-20 chars, 7-15        │
+                      │       WEB UI              │                    │  │   digits, optional)       │
+                      │                           │                    │  └─ Validate required fields │
+                      │  Shows success message:   │                    │                              │
+                      │  "Please check your email │                    │  Step 2: Password Hashing    │
+                      │   to verify your account" │                    │  └─ Bcrypt hash (10 rounds)  │
                       │                           │                    │                              │
-                      │  Shows success message:   │                    │  Step 4: Event Publishing    │
-                      │  "Please check your email │                    │  └─ Publish: user.created    │
-                      │   to verify your account" │                    │     Data: { userId, email,   │
-                      │                           │                    │            createdAt }       │
-                      │  JWT stored in cookie     │                    │                              │
-                      │  (for authenticated       │                    │  Step 5: Response            │
-                      │   requests after          │                    │  └─ Return: user object      │
-                      │   verification)           │                    │                              │
-                      └───────────────────────────┘                    └──────────────┬───────────────┘
+                      │  JWT stored in cookie     │                    │  Step 3: User Creation       │
+                      │  (for authenticated       │                    │  ├─ Create user document     │
+                      │   requests after          │                    │  │  in MongoDB               │
+                      │   verification)           │                    │  ├─ Set isEmailVerified:     │
+                      └───────────────────────────┘                    │  │  false                    │
+                                                                       │  ├─ Set isActive: true       │
+                                                                       │  └─ Set default role:        │
+                                                                       │     ['customer']             │
+                                                                       │                              │
+                                                                       │  Step 4: Event Publishing    │
+                                                                       │  └─ Publish: user.created    │
+                                                                       │     Data: { userId, email,   │
+                                                                       │            createdAt }       │
+                                                                       │                              │
+                                                                       │  Step 5: Response            │
+                                                                       │  └─ Return: user object      │
+                                                                       │     or validation errors     │
+                                                                       │                              │
+                                                                       └──────────────┬───────────────┘
                                                                                       │
                                                                                       │ Publishes
                                                                                       │ user.created
@@ -219,91 +294,117 @@ Before testing the user registration workflow, ensure the following services are
 
 ## Detailed Step-by-Step Flow
 
-### **Phase 1: User Input**
+### **Step 1: User Input**
 
 ```
 User Browser
     ↓
-    Enters registration details:
-    - Email: user@example.com
-    - Password: SecurePass123!
+    Enters registration details (in sequence):
     - First Name: John
     - Last Name: Doe
-    - Phone (optional): +1234567890
+    - Email: user@example.com
+    - Phone Number: +1234567890
+    - Password: SecurePass123!
+    - Confirm Password: SecurePass123!
     ↓
     Clicks "Register" button
 ```
 
-### **Phase 2: Frontend Processing (Web UI)**
+### **Step 2: Frontend Processing (Web UI)**
 
 ```
 React Application (Port 3000)
     ↓
-    1. Client-side validation
-       ├─ Email format check
-       ├─ Password strength validation
-       ├─ Required fields check
+    1. Client-side validation (Layer 1)
+       ├─ Required fields check (firstName, lastName, email, password)
+       ├─ Email format: 5-100 chars, RFC pattern
+       ├─ Password: 6-25 chars, letter + number
+       ├─ FirstName: 2-50 chars, letters/spaces/hyphens/apostrophes/periods
+       ├─ LastName: 0-50 chars, same pattern
+       ├─ PhoneNumber: 7-20 chars, 7-15 digits (optional)
+       ├─ Password confirmation match
        └─ Form completeness
     ↓
     2. HTTP POST to BFF
-       URL: http://localhost:4000/bff/auth/register
+       URL: http://localhost:3100/bff/auth/register
        Method: POST
        Headers: Content-Type: application/json
        Body: {
-         "email": "user@example.com",
-         "password": "SecurePass123!",
          "firstName": "John",
          "lastName": "Doe",
-         "phoneNumber": "+1234567890"
+         "email": "user@example.com",
+         "phoneNumber": "+1234567890",
+         "password": "SecurePass123!"
        }
 ```
 
-### **Phase 3: API Gateway (Web BFF)**
+### **Step 3: API Gateway (Web BFF)**
 
 ```
-Express.js BFF (Port 4000)
+Express.js BFF (Port 3100)
     ↓
     1. Request reception
-    2. Generate correlation ID: uuid-v4
-    3. Add to request headers
+       ├─ Extract fields from req.body
+       └─ No validation performed (proxies to Auth Service)
+    2. Add correlation ID for tracking
+    3. Log registration attempt
     4. Proxy to Auth Service
-       URL: http://localhost:3001/auth/register
+       URL: http://localhost:3001/api/auth/register
        Headers:
          - Content-Type: application/json
          - X-Correlation-ID: <uuid>
-       Body: <pass-through>
-    5. Await response from Auth Service
+       Body: { email, password, firstName, lastName, phoneNumber }
+    5. Return response to client
+       ├─ Success: Pass through Auth Service response
+       └─ Error: Format error response with appropriate status code
 ```
 
-### **Phase 4: Authentication Service**
+### **Step 4: Authentication Service**
 
 ```
 Auth Service (Port 3001)
     ↓
-    1. VALIDATION PHASE
-       ├─ Email format: RFC 5322 compliant
-       ├─ Password strength:
-       │  ├─ Minimum 8 characters
-       │  ├─ At least 1 uppercase letter
-       │  ├─ At least 1 lowercase letter
-       │  ├─ At least 1 number
-       │  └─ At least 1 special character
-       ├─ Required fields: email, password, firstName, lastName
-       └─ Check if email exists (call User Service)
+    1. MINIMAL VALIDATION PHASE (Layer 2)
+       File: src/controllers/auth.controller.js - register()
+       ├─ Check required fields present: firstName, lastName, email, password
+       ├─ No format/pattern validation (User Service handles this)
+       └─ No uniqueness check (User Service handles this)
     ↓
     2. USER CREATION PHASE
-       Call User Service:
+       File: src/services/userServiceClient.js - createUser()
+
+       Service Client responsibilities:
+       ├─ Makes HTTP request to User Service
+       ├─ Handles network errors (converts to 503 Service Unavailable)
+       ├─ Extracts error messages from various response formats
+       ├─ Parses JSON/text responses
+       └─ Throws structured errors with statusCode and details
+
+       HTTP Request:
        POST http://localhost:3002/users
+       Headers: Content-Type: application/json
        Body: {
-         "email": "user@example.com",
-         "password": "SecurePass123!",  // Will be hashed by User Service
          "firstName": "John",
          "lastName": "Doe",
+         "email": "user@example.com",
          "phoneNumber": "+1234567890",
+         "password": "SecurePass123!",  // Will be validated & hashed by User Service
          "roles": ["customer"],
          "isEmailVerified": false,
          "isActive": true
        }
+
+       User Service performs (via userServiceClient):
+       ├─ Email uniqueness check (single DB query)
+       ├─ Complete format validation (Layer 3)
+       ├─ Password hashing
+       └─ User creation
+
+       userServiceClient Response handling:
+       ├─ Success (201): Returns created user object
+       ├─ Error (409): Throws error with statusCode 409, message "A user with this email already exists"
+       ├─ Error (400): Throws error with statusCode 400, extracted validation message
+       └─ Network Error: Throws error with statusCode 503, message "User service unavailable"
     ↓
     3. TOKEN GENERATION PHASE
        JWT Token:
@@ -381,15 +482,15 @@ Auth Service (Port 3001)
        }
 ```
 
-### **Phase 5: User Service (Data Persistence)**
+### **Step 5: User Service (Data Persistence)**
 
 ```
 User Service (Port 3002)
     ↓
     1. VALIDATION
-       ├─ Check email uniqueness in MongoDB
+       ├─ Validate required fields (firstName, lastName, email, password)
        ├─ Validate email format
-       └─ Validate required fields
+       └─ Check email uniqueness in MongoDB
     ↓
     2. PASSWORD HASHING
        ├─ Algorithm: Bcrypt
@@ -400,11 +501,11 @@ User Service (Port 3002)
     3. USER DOCUMENT CREATION
        MongoDB Insert:
        {
-         "email": "user@example.com",
-         "password": "$2b$10$N9qo8uLOickgx2ZMRZoMye...",
          "firstName": "John",
          "lastName": "Doe",
+         "email": "user@example.com",
          "phoneNumber": "+1234567890",
+         "password": "$2b$10$N9qo8uLOickgx2ZMRZoMye...",
          "isEmailVerified": false,
          "isActive": true,
          "roles": ["customer"],
@@ -429,7 +530,7 @@ User Service (Port 3002)
        Body: { user object without password }
 ```
 
-### **Phase 6: BFF Cookie Management**
+### **Step 6: BFF Cookie Management**
 
 ```
 Web BFF receives Auth Service response
@@ -466,7 +567,7 @@ Web BFF receives Auth Service response
     Returns response to Web UI
 ```
 
-### **Phase 7: Event Consumption - Audit Service**
+### **Step 7: Event Consumption - Audit Service**
 
 ```
 Audit Service (Port 3004)
@@ -498,7 +599,7 @@ Audit Service (Port 3004)
     6. Acknowledge message to RabbitMQ
 ```
 
-### **Phase 8: Event Consumption - Notification Service**
+### **Step 8: Event Consumption - Notification Service**
 
 ```
 Notification Service (Port 3003)
@@ -563,7 +664,7 @@ Notification Service (Port 3003)
        Send ACK to RabbitMQ
 ```
 
-### **Phase 9: User Interface Response**
+### **Step 9: User Interface Response**
 
 ```
 Web UI (React)
